@@ -1,4 +1,4 @@
-use std::{fmt, io::{self, Cursor}};
+use std::{fmt, io};
 use bytes::{Buf, BytesMut}; 
 use tokio_util::codec::{Decoder};
 use thiserror::Error;
@@ -177,7 +177,6 @@ pub struct PacketHeader {
 }
 
 impl PacketHeader {
-
     pub fn decode<B: Buf>(buf: &mut B) -> Result<Self, PacketHeaderError> {
         if buf.remaining() < PACKET_HEADER_LEN {
             return Err(PacketHeaderError::InvalidLen.into());
@@ -209,6 +208,17 @@ impl PacketHeader {
         })
     }
 
+    pub fn encode<B: bytes::BufMut>(&self, buf: &mut B) {
+        let type_ver = (u8::from(self.packet_type) << 4) | u8::from(self.version);
+        buf.put_u8(type_ver);
+        buf.put_u8(self.extension.into());
+        buf.put_u16(self.conn_id);
+        buf.put_u32(self.timestamp);
+        buf.put_u32(self.timestamp_diff);
+        buf.put_u32(self.wnd_size);
+        buf.put_u16(self.seq_nr);
+        buf.put_u16(self.ack_nr);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -228,10 +238,7 @@ impl Decoder for PacketCodec {
             return Err(DecodeError::Header(PacketHeaderError::InvalidLen));
         }
 
-        let mut cursor = Cursor::new(src.chunk());
-        let header = PacketHeader::decode(&mut cursor)?;
-
-        src.advance(PACKET_HEADER_LEN); 
+        let header = PacketHeader::decode(src)?;
 
         // TODO: 这里应该根据 header.extension 的值来决定是否还需要解析扩展部分，目前先忽略扩展部分的解析
 
@@ -513,6 +520,23 @@ mod tests {
             let decoded = result.unwrap();
             prop_assert!(decoded.is_some());
             prop_assert_eq!(decoded.unwrap(), packet);
+        }
+    }
+
+    // 测试 encode 方法 ------------
+
+    proptest! {
+        #[test]
+        fn test_encode_header(header in packet_header_strategy()) {
+            let mut buf = bytes::BytesMut::new();
+            header.encode(&mut buf);
+            
+            // 验证长度
+            assert_eq!(buf.len(), PACKET_HEADER_LEN);
+            
+            // 解码验证
+            let decoded = PacketHeader::decode(&mut buf.as_ref()).unwrap();
+            assert_eq!(decoded, header);
         }
     }
 }
