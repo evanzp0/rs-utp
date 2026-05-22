@@ -1,13 +1,13 @@
-use std::{fmt, io};
+use std::{fmt, io::{self, Cursor}};
 use bytes::{Buf, BytesMut}; 
-use tokio_util::codec::{Decoder, Encoder};
+use tokio_util::codec::{Decoder};
 use thiserror::Error;
 
 const PACKET_HEADER_LEN: usize = 20;
 
 // ------------------------------------
 
-#[derive(Error, Copy, Clone, Debug, PartialEq)]
+#[derive(Error, Copy, Clone, Debug)]
 #[error("invalid uTP version: {0}")]
 pub struct InvalidVersion(pub u8);
 
@@ -62,7 +62,7 @@ pub enum DecodeError {
 
 // ------------------------------------
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PacketType {
     Data,
     Fin,
@@ -112,7 +112,7 @@ impl From<PacketType> for u8 {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Version {
     One,
 }
@@ -136,7 +136,7 @@ impl From<Version> for u8 {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Extension {
     None,
     SelectiveAck,
@@ -163,7 +163,7 @@ impl From<Extension> for u8 {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PacketHeader {
     packet_type: PacketType,
     version: Version,
@@ -176,32 +176,27 @@ pub struct PacketHeader {
     ack_nr: u16,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct PacketCodec;
+impl PacketHeader {
 
-impl Decoder for PacketCodec {
-    type Item = PacketHeader;
-    type Error = DecodeError;
-
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        if src.len() < PACKET_HEADER_LEN {
-            return Err(DecodeError::Header(PacketHeaderError::InvalidLen));
+    pub fn decode<B: Buf>(buf: &mut B) -> Result<Self, PacketHeaderError> {
+        if buf.remaining() < PACKET_HEADER_LEN {
+            return Err(PacketHeaderError::InvalidLen.into());
         }
 
-        let type_ver = src.get_u8();
+        let type_ver = buf.get_u8();
         let packet_type = PacketType::try_from(type_ver >> 4)
             .map_err(PacketHeaderError::from)?;
         let version = Version::try_from(type_ver & 0x0F)
             .map_err(PacketHeaderError::from)?;
-        let extension = src.get_u8().into();
-        let conn_id = src.get_u16();
-        let timestamp = src.get_u32();
-        let timestamp_diff = src.get_u32();
-        let wnd_size = src.get_u32();
-        let seq_nr = src.get_u16();
-        let ack_nr = src.get_u16();
+        let extension = buf.get_u8().into();
+        let conn_id = buf.get_u16();
+        let timestamp = buf.get_u32();
+        let timestamp_diff = buf.get_u32();
+        let wnd_size = buf.get_u32();
+        let seq_nr = buf.get_u16();
+        let ack_nr = buf.get_u16();
 
-        Ok(Some(PacketHeader {
+        Ok(PacketHeader {
             packet_type,
             version,
             extension,
@@ -211,6 +206,37 @@ impl Decoder for PacketCodec {
             wnd_size,
             seq_nr,
             ack_nr,
+        })
+    }
+
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Packet {
+    header: PacketHeader,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PacketCodec;
+
+impl Decoder for PacketCodec {
+    type Item = Packet;
+    type Error = DecodeError;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if src.len() < PACKET_HEADER_LEN {
+            return Err(DecodeError::Header(PacketHeaderError::InvalidLen));
+        }
+
+        let mut cursor = Cursor::new(src.chunk());
+        let header = PacketHeader::decode(&mut cursor)?;
+
+        src.advance(PACKET_HEADER_LEN); 
+
+        // TODO: 这里应该根据 header.extension 的值来决定是否还需要解析扩展部分，目前先忽略扩展部分的解析
+
+        Ok(Some(Packet {
+            header,
         }))
     }
 }
@@ -291,12 +317,42 @@ mod tests {
         })
     }
 
+    // 为完整的 Packet 生成策略
+    fn packet_strategy() -> impl Strategy<Value = Packet> {
+        (
+            packet_type_strategy(),
+            extension_strategy(),
+            any::<u16>(),      // conn_id
+            any::<u32>(),      // timestamp
+            any::<u32>(),      // timestamp_diff
+            any::<u32>(),      // wnd_size
+            any::<u16>(),      // seq_nr
+            any::<u16>(),      // ack_nr
+        ).prop_map(|(packet_type, extension, conn_id, timestamp, timestamp_diff, wnd_size, seq_nr, ack_nr)| {
+            let header = PacketHeader {
+                packet_type,
+                version: Version::One,
+                extension,
+                conn_id,
+                timestamp,
+                timestamp_diff,
+                wnd_size,
+                seq_nr,
+                ack_nr,
+            };
+
+            Packet {
+                header,
+            }
+        })
+    }
+
     // 正常解码应该成功
     proptest! {
         #[test]
         fn test_decode_valid_header(header in packet_header_strategy()) {
             let mut bytes = BytesMut::new();
-            
+
             // 手动编码 PacketHeader
             let type_ver = (u8::from(header.packet_type) << 4) | u8::from(header.version);
             bytes.extend_from_slice(&type_ver.to_be_bytes());
@@ -308,13 +364,10 @@ mod tests {
             bytes.extend_from_slice(&header.seq_nr.to_be_bytes());
             bytes.extend_from_slice(&header.ack_nr.to_be_bytes());
             
-            let mut codec = PacketCodec;
-            let result = codec.decode(&mut bytes);
+            let result = PacketHeader::decode(&mut bytes);
             
             prop_assert!(result.is_ok());
-            let decoded = result.unwrap();
-            prop_assert!(decoded.is_some());
-            prop_assert_eq!(decoded.unwrap(), header);
+            prop_assert_eq!(result.unwrap(), header);
         }
     }
 
@@ -325,13 +378,12 @@ mod tests {
             let mut bytes = BytesMut::with_capacity(len);
             bytes.resize(len, 0u8);
             
-            let mut codec = PacketCodec;
-            let result = codec.decode(&mut bytes);
+            let result = PacketHeader::decode(&mut bytes);
             
             prop_assert!(result.is_err());
             let err = result.unwrap_err();
             match err {
-                DecodeError::Header(PacketHeaderError::InvalidLen) => {}
+                PacketHeaderError::InvalidLen => {}
                 _ => panic!("Expected InvalidLen error, got {:?}", err),
             }
         }
@@ -350,13 +402,12 @@ mod tests {
             // 填充剩余字段为任意值
             bytes.resize(PACKET_HEADER_LEN, 0u8);
             
-            let mut codec = PacketCodec;
-            let result = codec.decode(&mut bytes);
+            let result = PacketHeader::decode(&mut bytes);
             
             prop_assert!(result.is_err());
             let err = result.unwrap_err();
             match err {
-                DecodeError::Header(PacketHeaderError::InvalidPacketType(_)) => {}
+                PacketHeaderError::InvalidPacketType(_) => {}
                 _ => panic!("Expected InvalidPacketType error, got {:?}", err),
             }
         }
@@ -378,13 +429,12 @@ mod tests {
             // 填充剩余字段
             bytes.resize(PACKET_HEADER_LEN, 0u8);
             
-            let mut codec = PacketCodec;
-            let result = codec.decode(&mut bytes);
+            let result = PacketHeader::decode(&mut bytes);
             
             prop_assert!(result.is_err());
             let err = result.unwrap_err();
             match err {
-                DecodeError::Header(PacketHeaderError::InvalidVersion(_)) => {}
+                PacketHeaderError::InvalidVersion(_) => {}
                 _ => panic!("Expected InvalidVersion error, got {:?}", err),
             }
         }
@@ -432,9 +482,37 @@ mod tests {
             bytes.extend_from_slice(&header.seq_nr.to_be_bytes());
             bytes.extend_from_slice(&header.ack_nr.to_be_bytes());
             
-            let mut codec = PacketCodec;
-            let decoded = codec.decode(&mut bytes).unwrap().unwrap();
+            let decoded = PacketHeader::decode(&mut bytes).unwrap();
             assert_eq!(decoded, header);
+        }
+    }
+
+    // 正常 packet 解码应该成功
+    proptest! {
+        #[test]
+        fn test_decode_valid_packet(packet in packet_strategy()) {
+            let mut bytes = BytesMut::new();
+
+            let header = &packet.header;
+            
+            // 手动编码 PacketHeader
+            let type_ver = (u8::from(header.packet_type) << 4) | u8::from(header.version);
+            bytes.extend_from_slice(&type_ver.to_be_bytes());
+            bytes.extend_from_slice(&u8::from(header.extension).to_be_bytes());
+            bytes.extend_from_slice(&header.conn_id.to_be_bytes());
+            bytes.extend_from_slice(&header.timestamp.to_be_bytes());
+            bytes.extend_from_slice(&header.timestamp_diff.to_be_bytes());
+            bytes.extend_from_slice(&header.wnd_size.to_be_bytes());
+            bytes.extend_from_slice(&header.seq_nr.to_be_bytes());
+            bytes.extend_from_slice(&header.ack_nr.to_be_bytes());
+            
+            let mut codec = PacketCodec;
+            let result = codec.decode(&mut bytes);
+            
+            prop_assert!(result.is_ok());
+            let decoded = result.unwrap();
+            prop_assert!(decoded.is_some());
+            prop_assert_eq!(decoded.unwrap(), packet);
         }
     }
 }
