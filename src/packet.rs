@@ -35,8 +35,8 @@ pub enum PacketHeaderError {
     #[error(transparent)]
     InvalidVersion(InvalidVersion),
 
-    #[error("invalid length")]
-    InvalidLen,
+    #[error("invalid length: {0}")]
+    InvalidLen(usize),
 }
 
 impl From<InvalidPacketType> for PacketHeaderError {
@@ -113,8 +113,8 @@ impl From<PacketType> for u8 {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum Version {
-    One,
+pub enum Version {
+    V1,
 }
 
 impl TryFrom<u8> for Version {
@@ -122,7 +122,7 @@ impl TryFrom<u8> for Version {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            1 => Ok(Self::One),
+            1 => Ok(Self::V1),
             _ => Err(InvalidVersion(value)),
         }
     }
@@ -131,13 +131,13 @@ impl TryFrom<u8> for Version {
 impl From<Version> for u8 {
     fn from(value: Version) -> u8 {
         match value {
-            Version::One => 1,
+            Version::V1 => 1,
         }
     }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum Extension {
+pub enum Extension {
     None,
     SelectiveAck,
     Unknown(u8),
@@ -178,8 +178,9 @@ pub struct PacketHeader {
 
 impl PacketHeader {
     pub fn decode<B: Buf>(buf: &mut B) -> Result<Self, PacketHeaderError> {
-        if buf.remaining() < PACKET_HEADER_LEN {
-            return Err(PacketHeaderError::InvalidLen.into());
+        let remaining = buf.remaining();
+        if remaining < PACKET_HEADER_LEN {
+            return Err(PacketHeaderError::InvalidLen(remaining));
         }
 
         let type_ver = buf.get_u8();
@@ -226,6 +227,24 @@ pub struct Packet {
     header: PacketHeader,
 }
 
+impl Packet {
+    pub fn new(header: PacketHeader) -> Self {
+        Self { header }
+    }
+
+    // getter
+    pub fn packet_type(&self) -> PacketType { self.header.packet_type }
+    pub fn version(&self) -> Version { self.header.version }
+    pub fn extension(&self) -> Extension { self.header.extension }
+    pub fn conn_id(&self) -> u16 { self.header.conn_id }
+    pub fn timestamp(&self) -> u32 { self.header.timestamp }
+    pub fn timestamp_diff(&self) -> u32 { self.header.timestamp_diff }
+    pub fn wnd_size(&self) -> u32 { self.header.wnd_size }
+    pub fn seq_nr(&self) -> u16 { self.header.seq_nr }
+    pub fn ack_nr(&self) -> u16 { self.header.ack_nr }
+
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PacketCodec;
 
@@ -234,8 +253,14 @@ impl Decoder for PacketCodec {
     type Error = DecodeError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        if src.len() < PACKET_HEADER_LEN {
-            return Err(DecodeError::Header(PacketHeaderError::InvalidLen));
+        // 过滤空包（ICMP 错误导致的 0 字节读）
+        if src.is_empty() {
+            return Ok(None);  // 跳过，不报错
+        }
+
+        let len = src.len();
+        if len < PACKET_HEADER_LEN {
+            return Err(DecodeError::Header(PacketHeaderError::InvalidLen(len)));
         }
 
         let header = PacketHeader::decode(src)?;
@@ -261,6 +286,78 @@ impl Encoder<&Packet> for PacketCodec {
         // TODO: 写入 Payload
 
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PacketBuilder {
+    packet_type: PacketType,
+    conn_id: u16,
+    timestamp: u32,
+    timestamp_diff: u32,
+    wnd_size: u32,
+    seq_nr: u16,
+    ack_nr: u16,
+}
+
+impl PacketBuilder {
+    pub fn new(
+        packet_type: PacketType,
+        conn_id: u16,
+        timestamp: u32,
+        wnd_size: u32,
+        seq_nr: u16,
+    ) -> Self {
+        Self {
+            packet_type,
+            conn_id,
+            timestamp,
+            timestamp_diff: 0,
+            wnd_size,
+            seq_nr,
+            ack_nr: 0,
+        }
+    }
+
+    pub fn timestamp(mut self, timestamp: u32) -> Self {
+        self.timestamp = timestamp;
+        self
+    }
+
+    pub fn timestamp_diff(mut self, timestamp_diff: u32) -> Self {
+        self.timestamp_diff = timestamp_diff;
+        self
+    }
+
+    pub fn wnd_size(mut self, wnd_size: u32) -> Self {
+        self.wnd_size = wnd_size;
+        self
+    }
+
+    pub fn seq_nr(mut self, seq_nr: u16) -> Self {
+        self.seq_nr = seq_nr;
+        self
+    }
+
+    pub fn ack_nr(mut self, ack_nr: u16) -> Self {
+        self.ack_nr = ack_nr;
+        self
+    }
+
+    pub fn build(self) -> Packet {
+        Packet {
+            header: PacketHeader {
+                packet_type: self.packet_type,
+                version: Version::V1,
+                extension: Extension::None,
+                conn_id: self.conn_id,
+                timestamp: self.timestamp,
+                timestamp_diff: self.timestamp_diff,
+                wnd_size: self.wnd_size,
+                seq_nr: self.seq_nr,
+                ack_nr: self.ack_nr,
+            },
+        }
     }
 }
 
@@ -304,7 +401,7 @@ mod tests {
         ).prop_map(|(packet_type, extension, conn_id, timestamp, timestamp_diff, wnd_size, seq_nr, ack_nr)| {
             PacketHeader {
                 packet_type,
-                version: Version::One,
+                version: Version::V1,
                 extension,
                 conn_id,
                 timestamp,
@@ -359,7 +456,6 @@ mod tests {
             mut encoded_bytes in valid_encoded_header_strategy(),
             truncated_len in 0..PACKET_HEADER_LEN,
         ) {
-
             // 截断字节流
             let mut truncated_bytes = encoded_bytes.split_to(truncated_len);
             
@@ -367,7 +463,7 @@ mod tests {
             let result = codec.decode(&mut truncated_bytes);
             
             // 应该返回 InvalidLen 错误
-            prop_assert!(matches!(result, Err(DecodeError::Header(PacketHeaderError::InvalidLen))));
+            prop_assert!(matches!(result, Err(DecodeError::Header(PacketHeaderError::InvalidLen(_)))));
         }
     }
 
