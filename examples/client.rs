@@ -22,21 +22,21 @@ async fn main() -> io::Result<()> {
     // 发送一个请求包
     let request = PacketBuilder::new(
         PacketType::Data,
-        0x1234,
+        100,
         timestamp,
         1024 * 1024,
         1,
     )
-    .seq_nr(1)
+    .ack_nr(0)
     .build();
+    let payload = b"hello utp!";
     
-    let sent = send_packet(&socket, &server_addr, &request).await?;
+    let sent = send_packet(&socket, &server_addr, &request, payload).await?;
     println!("Sent len: {} ", sent);
 
     // 等待响应（只处理第一个包）
     let mut raw_buf = [0u8; 65535];
-    let (len, addr) = socket.recv_from(&mut raw_buf).await?;
-    println!("udp recv from {:?} , len: {} ", addr, len);
+    let (len, _) = socket.recv_from(&mut raw_buf).await?;
 
     let mut buf = BytesMut::from(&raw_buf[..len]);
     let result = Packet::decode(&mut buf);
@@ -44,10 +44,10 @@ async fn main() -> io::Result<()> {
     match result {
         Ok(packet) => {
             println!(
-                "Received response from {}: seq={}, ack={}",
-                addr,
-                packet.seq_nr(),
+                "Received ACK: conn_id={}, ack_nr={}, type={}", 
+                packet.conn_id(),
                 packet.ack_nr(),
+                packet.packet_type(),
             );
         }
         Err(e) => {
@@ -55,6 +55,5 @@ async fn main() -> io::Result<()> {
         }
     }
 
-    
     Ok(())
 }

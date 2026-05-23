@@ -22,11 +22,17 @@ async fn main() -> io::Result<()> {
         match Packet::decode(&mut buf) {
             Ok(packet) => {
                 println!(
-                    "Received uTP packet from {}: seq={}, ack={}",
+                    "Got packet from {}: type={}, conn_id={}, seq_nr={}",
                     addr,
+                    packet.packet_type(),
+                    packet.conn_id(),
                     packet.seq_nr(),
-                    packet.ack_nr(),
                 );
+
+                if len > 20 {
+                    let payload = &buf[..];
+                    println!("Payload: {}", String::from_utf8_lossy(payload));
+                }
 
                  // 发送响应示例
                 let packet_builder = PacketBuilder::new(
@@ -39,7 +45,7 @@ async fn main() -> io::Result<()> {
 
                 let packet: Packet = packet_builder.build();
 
-                let sent = send_packet(&socket, &addr,&packet).await?;
+                let sent = send_packet(&socket, &addr,&packet, &[]).await?;
                 println!("Sent len: {} ", sent);
             }
             Err(e) => {
