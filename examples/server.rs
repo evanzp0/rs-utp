@@ -1,31 +1,34 @@
+mod utils;
+
 use std::io;
 
-use futures::{SinkExt, StreamExt};
-use rs_utp::packet::{PacketBuilder, PacketCodec, PacketType};
+use bytes::BytesMut;
+use rs_utp::packet::{Packet, PacketBuilder, PacketType};
 use tokio::net::UdpSocket;
-use tokio_util::udp::UdpFramed;
+
+use crate::utils::send_packet;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:12345").await?;
-    
-    // 使用 UdpFramed 包装 socket，传入我们的编解码器
-    let mut framed = UdpFramed::new(socket, PacketCodec);
+    let mut raw_buf = [0u8; 65535];
 
-    // 此时 framed 实现了 Stream<Item = Result<(Packet, SocketAddr), io::Error>>
-    while let Some(result) = framed.next().await {
-        match result {
-            Ok((packet, addr)) => {
+    loop {
+        let (len, addr) = socket.recv_from(&mut raw_buf).await?;
+        println!("udp recv from {:?} , len: {} ", addr, len);
+
+        let mut buf = BytesMut::from(&raw_buf[0..len]);
+
+        match Packet::decode(&mut buf) {
+            Ok(packet) => {
                 println!(
                     "Received uTP packet from {}: seq={}, ack={}",
                     addr,
                     packet.seq_nr(),
                     packet.ack_nr(),
                 );
-                
-                // 你的 uTP 逻辑：处理包、发送 ACK 等...
-                
-                // 发送响应示例
+
+                 // 发送响应示例
                 let packet_builder = PacketBuilder::new(
                         PacketType::State, 
                         packet.conn_id(), 
@@ -34,18 +37,16 @@ async fn main() -> io::Result<()> {
                         0,
                     ).ack_nr(packet.seq_nr());
 
-                let response = packet_builder.build();
+                let packet: Packet = packet_builder.build();
 
-                // 直接发送结构体，Encoder 会自动序列化
-                if let Err(e) = framed.send((&response, addr)).await {
-                    eprintln!("Error sending response to {}: {}", addr, e);
-                }
+                let sent = send_packet(&socket, &addr,&packet).await?;
+                println!("Sent len: {} ", sent);
             }
             Err(e) => {
                 eprintln!("Error receiving packet: {}", e);
             }
         }
-    }
 
-    Ok(())
+
+    }
 }
