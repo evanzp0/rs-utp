@@ -10,7 +10,7 @@ use crate::utils::send_packet;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let socket = UdpSocket::bind("0.0.0.0:12345").await?;
+    let socket = UdpSocket::bind("0.0.0.0:19000").await?;
     let mut raw_buf = [0u8; 65535];
 
     loop {

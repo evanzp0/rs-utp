@@ -11,8 +11,8 @@ use crate::utils::send_packet;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    let server_addr = "127.0.0.1:12345".parse().unwrap();
+    let socket = UdpSocket::bind("0.0.0.0:19001").await?;
+    let server_addr = "127.0.0.1:19000".parse().unwrap();
     
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
