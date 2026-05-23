@@ -29,6 +29,7 @@ async fn main() -> io::Result<()> {
     )
     .ack_nr(0)
     .build();
+
     let payload = b"hello utp!";
     
     let sent = send_packet(&socket, &server_addr, &request, payload).await?;
