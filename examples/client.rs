@@ -1,60 +1,35 @@
-mod utils;
+use std::{io, net::SocketAddr};
 
-use std::io;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use bytes::BytesMut;
-use rs_utp::packet::{Packet, PacketBuilder, PacketType};
-use tokio::net::UdpSocket;
-
-use crate::utils::send_packet;
+use rs_utp::{packet::{PacketBuilder, PacketType}, socket::UtpSocket, time::now_micro};
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let socket = UdpSocket::bind("0.0.0.0:19001").await?;
-    let server_addr = "127.0.0.1:19000".parse().unwrap();
+    let local_addr: SocketAddr = "0.0.0.0:19001".parse().unwrap(); // 随机端口
+    let server_addr: SocketAddr = "127.0.0.1:19000".parse().unwrap();
+
+    let socket = UtpSocket::bind(local_addr).await?;
     
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_micros() as u32;
-    
-    // 发送一个请求包
-    let request = PacketBuilder::new(
-        PacketType::Data,
-        100,
-        timestamp,
-        1024 * 1024,
-        1,
-    )
-    .ack_nr(0)
-    .build();
-
-    let payload = b"hello utp!";
-    
-    let sent = send_packet(&socket, &server_addr, &request, payload).await?;
-    println!("Sent len: {} ", sent);
-
-    // 等待响应（只处理第一个包）
-    let mut raw_buf = [0u8; 65535];
-    let (len, _) = socket.recv_from(&mut raw_buf).await?;
-
-    let mut buf = BytesMut::from(&raw_buf[..len]);
-    let result = Packet::decode(&mut buf);
-
-    match result {
-        Ok(packet) => {
-            println!(
-                "Received ACK: conn_id={}, ack_nr={}, type={}", 
-                packet.conn_id(),
-                packet.ack_nr(),
-                packet.packet_type(),
-            );
+    println!("Connecting to {}...", server_addr);
+    match socket.connect(server_addr).await {
+        Ok(stream) => {
+            println!("Connect success! Peer: {}", stream.peer_addr());
+            
+            // V0.2 关键验证：客户端连接成功后，必须发送一个 ST_DATA 包！
+            // 否则服务端的 Connection 永远不会从 Connecting 变为 Connected (AcceptReady)
+            println!("Simulating sending first DATA packet to complete server handshake...");
+            
+            // 发送 DATA 包的方法，这里仅作伪代码演示
+            socket.send_mock_data(stream.conn_id()).await;
+            
+            // 真实场景中，V0.3 实现了 stream.write() 后，这里会是：
+            // stream.write(b"hello").await?;
         }
         Err(e) => {
-            eprintln!("Error: {}", e);
+            eprintln!("Connect failed: {}", e);
         }
     }
 
+    // 阻塞主线程，防止退出
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     Ok(())
 }

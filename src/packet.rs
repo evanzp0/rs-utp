@@ -1,5 +1,5 @@
 use std::fmt;
-use bytes::{Buf, BufMut}; 
+use bytes::{Buf, BufMut, BytesMut}; 
 use thiserror::Error;
 
 pub const PACKET_HEADER_LEN: usize = 20;
@@ -254,6 +254,13 @@ impl Packet {
         // TODO: 写入扩展头部 (如果有)
 
         // TODO: 写入 Payload
+    }
+
+    pub fn encode(&self) -> impl AsRef<[u8]> {
+        let mut buffer = BytesMut::with_capacity(PACKET_HEADER_LEN);
+        self.encode_to(&mut buffer);
+
+        buffer.freeze()
     }
 }
 

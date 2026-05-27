@@ -1,58 +1,25 @@
-mod utils;
 
-use std::io;
+use std::{io, net::SocketAddr};
 
-use bytes::BytesMut;
-use rs_utp::packet::{Packet, PacketBuilder, PacketType};
-use tokio::net::UdpSocket;
-
-use crate::utils::send_packet;
+use rs_utp::socket::UtpSocket;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let socket = UdpSocket::bind("0.0.0.0:19000").await?;
-    let mut raw_buf = [0u8; 65535];
+    let addr: SocketAddr = "0.0.0.0:19000".parse().unwrap();
+    let socket = UtpSocket::bind(addr).await?;
+    let mut listener = socket.listen();
+    
+    println!("Server listening on {}", addr);
 
     loop {
-        let (len, addr) = socket.recv_from(&mut raw_buf).await?;
-        println!("udp recv from {:?} , len: {} ", addr, len);
-
-        let mut buf = BytesMut::from(&raw_buf[0..len]);
-
-        match Packet::decode(&mut buf) {
-            Ok(packet) => {
-                println!(
-                    "Got packet from {}: type={}, conn_id={}, seq_nr={}",
-                    addr,
-                    packet.packet_type(),
-                    packet.conn_id(),
-                    packet.seq_nr(),
-                );
-
-                if len > 20 {
-                    let payload = &buf[..];
-                    println!("Payload: {}", String::from_utf8_lossy(payload));
-                }
-
-                 // 发送响应示例
-                let packet_builder = PacketBuilder::new(
-                        PacketType::State, 
-                        packet.conn_id(), 
-                        0, 
-                        1024 * 1024, 
-                        0,
-                    ).ack_nr(packet.seq_nr());
-
-                let packet: Packet = packet_builder.build();
-
-                let sent = send_packet(&socket, &addr,&packet, &[]).await?;
-                println!("Sent len: {} ", sent);
+        match listener.accept().await {
+            Ok(stream) => {
+                println!("Accepted connection from {}", stream.peer_addr());
+                // V0.3 会在这里 spawn 一个任务处理 stream 的读写
             }
             Err(e) => {
-                eprintln!("Error receiving packet: {}", e);
+                eprintln!("Accept error: {}", e);
             }
         }
-
-
     }
 }
