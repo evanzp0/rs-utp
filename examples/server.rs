@@ -7,12 +7,11 @@ use rs_utp::socket::UtpSocket;
 async fn main() -> io::Result<()> {
     let addr: SocketAddr = "0.0.0.0:19000".parse().unwrap();
     let socket = UtpSocket::bind(addr).await?;
-    let mut listener = socket.listen();
     
     println!("Server listening on {}", addr);
 
     loop {
-        match listener.accept().await {
+        match socket.accept().await {
             Ok(stream) => {
                 println!("Accepted connection from {}", stream.peer_addr());
                 // V0.3 会在这里 spawn 一个任务处理 stream 的读写

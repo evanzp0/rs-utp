@@ -1,6 +1,6 @@
 use std::{io, net::SocketAddr};
 
-use rs_utp::{packet::{PacketBuilder, PacketType}, socket::UtpSocket, time::now_micro};
+use rs_utp::socket::UtpSocket;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -28,8 +28,6 @@ async fn main() -> io::Result<()> {
             eprintln!("Connect failed: {}", e);
         }
     }
-
-    // 阻塞主线程，防止退出
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    
     Ok(())
 }

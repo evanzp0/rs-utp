@@ -16,18 +16,6 @@ use crate::{
     stream::UtpStream,
 };
 
-pub struct UtpListener {
-    rx: mpsc::Receiver<UtpStream>,
-}
-impl UtpListener {
-    pub async fn accept(&mut self) -> io::Result<UtpStream> {
-        self.rx
-            .recv()
-            .await
-            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Closed"))
-    }
-}
-
 struct SocketInner {
     conns: HashMap<u16, Connection>,
     accept_tx: Option<mpsc::Sender<UtpStream>>,
@@ -54,31 +42,38 @@ impl UtpSocket {
         Ok(socket)
     }
 
-    pub fn listen(&self) -> UtpListener {
-        let (tx, rx) = mpsc::channel(1024);
-        let mut inner = self.inner.lock().expect("get inner failed");
-        inner.accept_tx = Some(tx);
+    pub async fn accept(&self) -> io::Result<UtpStream> {
+        let (tx, mut rx) = mpsc::channel(1);
 
-        UtpListener { rx }
+        {
+            let mut inner = self.inner.lock().expect("get inner failed");
+            inner.accept_tx = Some(tx);
+        }
+
+        rx.recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Closed"))
     }
 
-    pub async fn connect(&self, addr: std::net::SocketAddr) -> io::Result<UtpStream> {
+    pub async fn connect(&self, peer_addr: std::net::SocketAddr) -> io::Result<UtpStream> {
         let (tx, rx) = oneshot::channel();
 
         let conn_id = random();
-        let mut conn = Connection::new_active(conn_id, addr, tx);
-        let syn_pkt = conn.syn();
-        let _ = self.udp.send_to(syn_pkt.encode().as_ref(), addr).await;
+        let (conn, syn) = Connection::new_active(conn_id, peer_addr, tx);
 
-        let mut inner = self.inner.lock().expect("get inner failed");
-        inner.conns.insert(conn_id, conn);
-        drop(inner);
+        let _rst = self.udp.send_to(syn.encode().as_ref(), peer_addr).await;
+        println!("send syn: {:#?}, rst: {:#?}", syn, _rst);
+
+        {
+            let mut inner = self.inner.lock().expect("get inner failed");
+            inner.conns.insert(conn_id, conn);
+        }
 
         let _ = rx
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::ConnectionRefused, "Closed"))?;
 
-        Ok(UtpStream::new(conn_id, addr))
+        Ok(UtpStream::new(conn_id, peer_addr))
     }
 
     async fn run(udp: Arc<UdpSocket>, inner: Arc<Mutex<SocketInner>>) {
@@ -100,47 +95,48 @@ impl UtpSocket {
         pkt: Packet,
         addr: std::net::SocketAddr,
     ) {
-        let (actions, accept_tx) = {
-            let mut inner = inner.lock().unwrap();
+        println!("on packet: {:#?}", pkt);
 
-            let actions = if pkt.packet_type() == PacketType::Syn {
-                let recv_id = pkt.conn_id().wrapping_add(1);
-                if inner.conns.contains_key(&recv_id) {
-                    vec![]
-                } else {
-                    let mut conn = Connection::new_passive(&pkt, addr);
-                    let syn_ack_pkt = conn.syn_ack();
-                    inner.conns.insert(conn.conn_id_recv(), conn);
-                    vec![Action::Send(syn_ack_pkt)]
+        let mut action = None;
+
+        if pkt.packet_type() == PacketType::Syn {
+            let mut inner = inner.lock().expect("get socket inner error");
+
+            // 收到 SYN 包，建立 Connection，发送 SYN-ACK
+            let send_id = pkt.conn_id();
+            let recv_id = send_id.wrapping_add(1);
+
+            if !inner.conns.contains_key(&recv_id) {
+                let (conn, syn_ack) = Connection::new_passive(&pkt, addr);
+                inner.conns.insert(conn.conn_id_recv(), conn);
+
+                if let Some(tx) = &inner.accept_tx {
+                    // 通知被动连接 accept()
+                    let stream = UtpStream::new(recv_id, addr);
+                    let _ = tx.try_send(stream);
                 }
-            } else {
-                let recv_id = pkt.conn_id();
-                if let Some(conn) = inner.conns.get_mut(&recv_id) {
-                    conn.on_packet(&pkt)
-                } else {
-                    vec![]
-                }
-            };
+                
+                action = Some(Action::Send(syn_ack))
+            }
+        } else {
+            // 非 SYN 包，都转交 Connection 处理
+            let mut inner = inner.lock().expect("get socket inner error");
 
-            let tx_clone = inner.accept_tx.clone();
-            (actions, tx_clone)
-        };
+            let recv_id = pkt.conn_id();
+            if let Some(conn) = inner.conns.get_mut(&recv_id) {
+                action = conn.on_packet(&pkt);
+            }
+        }
 
-        println!("recv {:?}", pkt.packet_type());
-
-        for action in actions {
-            match action {
+        if let Some(v) = action {
+            match v {
                 Action::Send(pkt_to_send) => {
-                    udp.send_to(pkt_to_send.encode().as_ref(), addr).await.ok();
+                    let _rst = udp.send_to(pkt_to_send.encode().as_ref(), addr).await;
+                    println!("auto send: {:#?}, rst: {:#?}", pkt_to_send, _rst);
                 }
                 Action::ConnectSuccess(tx) => {
+                    // 通知主动连接 connection()
                     tx.send(Ok(())).ok();
-                }
-                Action::AcceptReady { recv_id, peer_addr } => {
-                    if let Some(tx) = accept_tx.as_ref() {
-                        let stream = UtpStream::new(recv_id, peer_addr);
-                        tx.try_send(stream).ok();
-                    }
                 }
             }
         }
@@ -150,15 +146,16 @@ impl UtpSocket {
 impl UtpSocket {
     pub async fn send_mock_data(&self, conn_id: u16) {
         let mut inner = self.inner.lock().unwrap();
+        
         if let Some(conn) = inner.conns.get_mut(&conn_id) {
             let data_packet = conn.mock_data();
+
+            println!("send mock data: {:#?}", data_packet);
 
             self.udp
                 .send_to(data_packet.encode().as_ref(), conn.peer_addr())
                 .await
                 .ok();
         }
-
-        ()
     }
 }
