@@ -1,8 +1,9 @@
 use std::fmt;
-use bytes::{Buf, BufMut, BytesMut}; 
+use bytes::{Buf, BufMut, Bytes, BytesMut}; 
 use thiserror::Error;
 
 pub const PACKET_HEADER_LEN: usize = 20;
+pub const MAX_PAYLOAD_SIZE: usize = 1400;
 
 // ------------------------------------
 
@@ -219,11 +220,12 @@ impl PacketHeader {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Packet {
     header: PacketHeader,
+    payload: Bytes,
 }
 
 impl Packet {
-    pub fn new(header: PacketHeader) -> Self {
-        Self { header }
+    pub fn new(header: PacketHeader, payload: Bytes) -> Self {
+        Self { header, payload }
     }
 
     // getter -----------
@@ -243,9 +245,13 @@ impl Packet {
     pub fn decode<B: Buf>(buf: &mut B) -> Result<Self, PacketError>{
         let header = PacketHeader::decode(buf)?;
 
+        // buf 零拷贝
+        let payload = buf.copy_to_bytes(buf.remaining());
+
+
         // TODO: 这里应该根据 header.extension 的值来决定是否还需要解析扩展部分，目前先忽略扩展部分的解析
 
-        Ok(Packet { header })
+        Ok(Packet { header, payload })
     }
 
     pub fn encode_to<B: BufMut>(&self, buf: &mut B) {
@@ -253,7 +259,9 @@ impl Packet {
 
         // TODO: 写入扩展头部 (如果有)
 
-        // TODO: 写入 Payload
+        if !self.payload.is_empty() {
+            buf.put_slice(&self.payload);
+        }
     }
 
     pub fn encode(&self) -> impl AsRef<[u8]> {
@@ -273,6 +281,7 @@ pub struct PacketBuilder {
     wnd_size: u32,
     seq_nr: u16,
     ack_nr: u16,
+    payload: Option<Bytes>,
 }
 
 impl PacketBuilder {
@@ -291,6 +300,7 @@ impl PacketBuilder {
             wnd_size,
             seq_nr,
             ack_nr: 0,
+            payload: None,
         }
     }
 
@@ -319,6 +329,11 @@ impl PacketBuilder {
         self
     }
 
+    pub fn payload(mut self, payload: Bytes) -> Self {
+        self.payload = Some(payload);
+        self
+    }
+
     pub fn build(self) -> Packet {
         Packet {
             header: PacketHeader {
@@ -332,6 +347,7 @@ impl PacketBuilder {
                 seq_nr: self.seq_nr,
                 ack_nr: self.ack_nr,
             },
+            payload: self.payload.unwrap_or_default(),
         }
     }
 }
@@ -397,9 +413,16 @@ mod tests {
         })
     }
 
+    // 为 payload 生成策略
+    fn payload_strategy() -> impl Strategy<Value = Bytes> {
+        prop::collection::vec(any::<u8>(), 0..MAX_PAYLOAD_SIZE)
+            .prop_map(|vec| Bytes::from(vec))
+    }
+
     // 为完整的 Packet 生成策略
     fn packet_strategy() -> impl Strategy<Value = Packet> {
-        packet_header_strategy().prop_map(|header| Packet { header })
+        (packet_header_strategy(), payload_strategy())
+            .prop_map(|(header, payload)| Packet { header, payload })
     }
 
     // ------------------------------------
@@ -507,8 +530,8 @@ mod tests {
 
             packet.encode_to(&mut buf);
 
-            assert_eq!(buf.len(), PACKET_HEADER_LEN);
-
+            let expected_len = PACKET_HEADER_LEN + packet.payload.len();
+            prop_assert_eq!(buf.len(), expected_len);
             
             // 解码验证
             let decoded = Packet::decode(&mut buf);
