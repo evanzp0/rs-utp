@@ -19,8 +19,8 @@
 
 | 维度 | 实现内容 | 侧重程度 |
 | :--- | :--- | :--- |
-| **核心API** | 雏形出现：`UtpSocket::bind()`，`UtpStream::connect(addr)`，`UtpListener::accept()`。 | ⭐⭐ |
-| **状态机** | **核心重点**：定义 `UtpState` 枚举；实现三次握手状态流转：`Closed -> SynSent -> Connected`（客户端），`Listening -> SynReceived -> Connected`（服务端）。 | ⭐⭐⭐⭐⭐ |
+| **核心API** | 雏形出现：`UtpSocket::bind()`，`UtpSocket::accept()`，`UtpStream::connect(addr)`。 | ⭐⭐ |
+| **状态机** | **核心重点**：定义 `UtpState` 枚举；实现三次握手状态流转：`Closed -> SynSent -> Connected`（客户端），`Accepting -> SynReceived -> Connected`（服务端）。 | ⭐⭐⭐⭐⭐ |
 | **数据结构** | 引入 `UtpStream` 上下文结构体，保存：`local_conn_id`，`remote_conn_id`，`seq_nr`，`ack_nr`。 | ⭐⭐⭐ |
 | **异步驱动** | 引入基础异步：将 `UdpSocket` 换为 `tokio::net::UdpSocket`；`connect` 和 `accept` 返回 `Future`，异步等待握手回应包。 | ⭐⭐ |
 
